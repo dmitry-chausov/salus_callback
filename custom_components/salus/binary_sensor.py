@@ -31,30 +31,55 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     gateway = hass.data[DOMAIN][config_entry.entry_id]
 
-    async def async_update_data():
-        """Fetch data from API endpoint.
-
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-        """
+    async def async_update_data_sw600():
+        """Fetch data from API endpoint for SW600 sensors (window/door sensors)."""
         async with async_timeout.timeout(10):
             await gateway.poll_status()
-            return gateway.get_binary_sensor_devices()
+            all_sensors = gateway.get_binary_sensor_devices()
+            # Filter only SW600 sensors
+            return {idx: sensor for idx, sensor in all_sensors.items()
+                    if sensor.model == "SW600"}
 
-    coordinator = DataUpdateCoordinator(
+    async def async_update_data_other():
+        """Fetch data from API endpoint for other binary sensors."""
+        async with async_timeout.timeout(10):
+            await gateway.poll_status()
+            all_sensors = gateway.get_binary_sensor_devices()
+            # Filter non-SW600 sensors
+            return {idx: sensor for idx, sensor in all_sensors.items()
+                    if sensor.model != "SW600"}
+
+    # Coordinator for SW600 sensors with 5 second polling
+    coordinator_sw600 = DataUpdateCoordinator(
         hass,
         _LOGGER,
         config_entry=config_entry,
-        name="sensor",
-        update_method=async_update_data,
+        name="sensor_sw600",
+        update_method=async_update_data_sw600,
+        update_interval=timedelta(seconds=5),
+    )
+
+    # Coordinator for other binary sensors with 30 second polling
+    coordinator_other = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        config_entry=config_entry,
+        name="sensor_other",
+        update_method=async_update_data_other,
         update_interval=timedelta(seconds=30),
     )
 
     # Fetch initial data so we have data when entities subscribe
-    await coordinator.async_refresh()
+    await coordinator_sw600.async_refresh()
+    await coordinator_other.async_refresh()
 
-    async_add_entities(SalusBinarySensor(coordinator, idx, gateway) for idx
-                       in coordinator.data)
+    # Add SW600 sensors with fast polling
+    async_add_entities(SalusBinarySensor(coordinator_sw600, idx, gateway) for idx
+                       in coordinator_sw600.data)
+
+    # Add other binary sensors with normal polling
+    async_add_entities(SalusBinarySensor(coordinator_other, idx, gateway) for idx
+                       in coordinator_other.data)
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
