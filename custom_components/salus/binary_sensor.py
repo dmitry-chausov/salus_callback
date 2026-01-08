@@ -2,6 +2,7 @@
 from datetime import timedelta
 import logging
 import async_timeout
+import asyncio
 
 import voluptuous as vol
 from homeassistant.components.binary_sensor import PLATFORM_SCHEMA, BinarySensorEntity
@@ -31,32 +32,51 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     gateway = hass.data[DOMAIN][config_entry.entry_id]
 
+    # Per-gateway cache to avoid duplicate polls
+    gateway_cache = {"data": None, "time": None}
+    gateway_lock = asyncio.Lock()
+
+    async def get_cached_sensors():
+        """Get all sensors with caching to avoid duplicate gateway polls."""
+        import time
+
+        async with gateway_lock:
+            # Use cached data if less than 1 second old
+            if (gateway_cache["data"] is not None and
+                gateway_cache["time"] is not None and
+                time.time() - gateway_cache["time"] < 1.0):
+                return gateway_cache["data"]
+
+            # Fetch new data
+            async with async_timeout.timeout(10):
+                await gateway.poll_status()
+                all_sensors = gateway.get_binary_sensor_devices()
+                gateway_cache["data"] = all_sensors
+                gateway_cache["time"] = time.time()
+                return all_sensors
+
     async def async_update_data_sw600():
         """Fetch data from API endpoint for SW600 sensors (window/door sensors)."""
-        async with async_timeout.timeout(10):
-            await gateway.poll_status()
-            all_sensors = gateway.get_binary_sensor_devices()
-            # Filter only SW600 sensors
-            return {idx: sensor for idx, sensor in all_sensors.items()
-                    if sensor.model == "SW600"}
+        all_sensors = await get_cached_sensors()
+        # Filter only SW600 sensors
+        return {idx: sensor for idx, sensor in all_sensors.items()
+                if sensor.model == "SW600"}
 
     async def async_update_data_other():
         """Fetch data from API endpoint for other binary sensors."""
-        async with async_timeout.timeout(10):
-            await gateway.poll_status()
-            all_sensors = gateway.get_binary_sensor_devices()
-            # Filter non-SW600 sensors
-            return {idx: sensor for idx, sensor in all_sensors.items()
-                    if sensor.model != "SW600"}
+        all_sensors = await get_cached_sensors()
+        # Filter non-SW600 sensors
+        return {idx: sensor for idx, sensor in all_sensors.items()
+                if sensor.model != "SW600"}
 
-    # Coordinator for SW600 sensors with 5 second polling
+    # Coordinator for SW600 sensors with 3 second polling
     coordinator_sw600 = DataUpdateCoordinator(
         hass,
         _LOGGER,
         config_entry=config_entry,
         name="sensor_sw600",
         update_method=async_update_data_sw600,
-        update_interval=timedelta(seconds=5),
+        update_interval=timedelta(seconds=3),
     )
 
     # Coordinator for other binary sensors with 30 second polling
